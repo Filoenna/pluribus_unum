@@ -1,0 +1,229 @@
+CLINIC DIAGNOSIS REGISTRY - PYTHON SOLUTION PREVIEW
+====================================================
+Source spec: ../ZADANIE.md
+Stack: Python 3.14, FastAPI (async), SQLAlchemy 2.0 async ORM + Alembic,
+       raw SQL for the aggregation query, Strawberry GraphQL, httpx + tenacity.
+
+This file is a preview of the whole solution before any code is written:
+what gets built, where it lives, and how each requirement in ZADANIE.md maps
+to a concrete piece of the design. Nothing here is final - it's meant to be
+read and corrected before implementation starts.
+
+
+1. C#-SPECIFIC ASKS -> PYTHON EQUIVALENTS
+------------------------------------------
+| ZADANIE.md asks for (C# framing)                  | Python equivalent                                            |
+|-----------------------------------------------------|---------------------------------------------------------------|
+| EF Core writes to SQLite, schema via migration,    | SQLAlchemy 2.0 async ORM + Alembic migrations.                |
+| not EnsureCreated                                  | (metadata.create_all() is the forbidden EnsureCreated twin.)  |
+| Aggregation query run via Dapper, not EF, not      | Raw SQL via `text()` on a bare SQLAlchemy connection,          |
+| in-process                                         | bypassing the ORM Session entirely - same engine, no ORM.     |
+| ValueSet must not be hardcoded in C# source         | ValueSet must not be a Python literal - loaded from a JSON    |
+|                                                     | file at startup into an in-memory singleton.                  |
+| GraphQL endpoint                                   | Strawberry GraphQL (code-first, type-hint driven).             |
+| application/problem+json (built into ASP.NET Core) | Hand-rolled RFC 7807 ProblemDetails model + FastAPI exception |
+|                                                     | handler (the one place Python needs scaffolding C# gets free).|
+| Rejection is a normal outcome, not an exception     | Result[T, list[Violation]] return type in the domain/service  |
+|                                                     | layer; the HTTP route only translates Result -> status code.  |
+| ASP.NET Web API                                    | FastAPI (Pydantic validation, automatic OpenAPI, async-first).|
+| Retry policy, transient-only, with backoff         | tenacity (stop_after_attempt(3), wait_fixed, retry_if_...)    |
+|                                                     | wrapping an httpx.AsyncClient call to the mock registry.       |
+
+
+2. DESIGN DECISIONS ALREADY MADE
+----------------------------------
+- Idempotent resend: POSTing the same (source_system, source_record_id) twice
+  returns 201 again with the SAME Location header both times. Enforced by a
+  DB unique constraint on that pair + "fetch existing, don't insert" in the
+  service layer (race-safe under concurrent resends, not just a pre-check).
+
+- Patient lookup by kartoteka number: since the same kartoteka number can name
+  two different people across SYS-A/SYS-B, a lookup by kartoteka number ALONE
+  is inherently ambiguous. PESEL search stays a single parameter (globally
+  unique). Kartoteka search requires source_system as a second, mandatory
+  parameter, so the pair is always unique.
+
+- Mock registry is a real HTTP hop: implemented as its own FastAPI router
+  with its own per-diagnosis attempt counter, mounted in the same app, but
+  called through httpx.AsyncClient over loopback HTTP - never by importing
+  and calling its handler function directly.
+
+- ValueSet resource shape: modeled as a simplified FHIR ValueSet (the spec's
+  vocabulary - "zasob ValueSet", "adres kanoniczny", "system kodowania",
+  "kody z opisami" - maps directly onto FHIR's `url`, `compose.include.system`
+  and `compose.include.concept[].{code,display}`). Withdrawn ("wycofany")
+  codes are marked `"inactive": true` on their concept entry and are rejected
+  for new registrations even though they're present in the set.
+
+- Onset (date vs age) is modeled as a discriminated union enforced at the
+  request-DTO layer (Pydantic validator) - exactly one of onset_date /
+  onset_age, never both, never neither. This is a shape rule, separate from
+  the three business rules the spec asks to aggregate into one 400.
+
+
+3. FOLDER STRUCTURE (python/)
+-------------------------------
+python/
+  app/
+    domain/
+      entities.py         Patient, Diagnosis, Visit as plain dataclasses
+      value_objects.py    Onset (OnsetDate | OnsetAge), ClinicalStatus,
+                           ConfirmationDegree, SourceSystem enums
+      result.py            Result[T] / Violation - hand-rolled, no dependency
+      rules.py             the 3 aggregated checks + status-transition rule
+                            (cured -> active forbidden) as pure functions
+    valueset/
+      models.py            ValueSet / Concept pydantic models (FHIR-shaped)
+      loader.py             reads data/valueset.json once at startup
+    persistence/
+      models.py             SQLAlchemy ORM models (patients, diagnoses, visits,
+                             registry_submissions)
+      repository.py         async repository: register (1 transaction),
+                             list/filter/sort/paginate, patient search,
+                             status change
+      queries.py             raw-SQL aggregation: COUNT(*) GROUP BY icd10_code
+                             ORDER BY count DESC - the "Dapper" query
+    integration/
+      registry_client.py    httpx.AsyncClient + tenacity retry wrapper;
+                             retries only on 503 (transient), never on 400
+    api/
+      rest/
+        diagnoses.py         POST /diagnoses (register), GET /diagnoses
+        patients.py           GET /patients/search?pesel=... or
+                               ?source_system=...&kartoteka=...
+        status.py              PATCH /diagnoses/{id}/status
+        registry_mock.py       POST /mock/registry - the atrapa, per-diagnosis
+                               attempt counter, 503/503/202, 400 for missing
+                               id/code
+        problem_details.py     RFC 7807 model + exception handler wired into
+                               the FastAPI app
+      graphql/
+        schema.py               Strawberry schema: patient -> diagnoses ->
+                                code nested query; registerDiagnosis mutation
+                                that returns a union/errors-in-payload result
+    main.py                    app assembly; startup event loads the
+                               ValueSet singleton; mounts REST + GraphQL
+  alembic/
+    env.py, versions/0001_initial.py   schema baseline (not EnsureCreated)
+  data/
+    valueset.json               >= 5 codes with descriptions, one withdrawn,
+                                canonical url, explicit coding system
+    seed.py                      loads every scenario listed in ZADANIE.md's
+                                "Dane" section (see section 6 below)
+  tests/
+    test_registration.py         3-rules-at-once 400, no stack trace leak,
+                                idempotent resend (sequential + concurrent)
+    test_registry_retry.py       503/503/202 counting, missing id/code -> 400
+                                never retried, "registry silent" still saves
+                                the diagnosis and exposes failed state
+    test_reads.py                  pagination hard cap, filter+sort, patient
+                                search incl. ambiguous-kartoteka case
+    test_status_transition.py     cured -> active -> 409
+    test_graphql.py                nested query, mutation error-in-data shape
+    test_aggregation.py            raw-SQL grouped count matches seeded data
+  pyproject.toml, .python-version, README.md
+
+
+4. REST API SURFACE
+----------------------
+POST   /diagnoses
+  body: { sourceSystem, sourceRecordId, patientRef (pesel | {sourceSystem,
+         kartoteka}), icd10Code, codingSystem, description(ignored on save),
+         diagnosisDate, clinicalStatus, confirmation,
+         onsetDate | onsetAge, visitId? }
+  201 Created + Location: /diagnoses/{id}          (also on idempotent resend)
+  400 application/problem+json, all violations listed together, on:
+         - diagnosisDate in the future
+         - icd10Code not in ValueSet / wrong codingSystem / withdrawn code
+         - (description is silently replaced by the ValueSet's canonical
+           text, not a rejection reason)
+
+GET    /patients/search?pesel=...
+GET    /patients/search?sourceSystem=SYS-A&kartoteka=...
+  200 single patient, unambiguous even when the kartoteka number exists in
+      both systems (because sourceSystem is mandatory alongside kartoteka)
+
+GET    /patients/{patientId}/diagnoses?status=aktywne&sort=diagnosisDate
+       &page=1&pageSize=20
+  200 paginated list; pageSize capped server-side, client cannot exceed it
+
+GET    /diagnoses/summary
+  200 [{ icd10Code, count }, ...] descending by count - backed by the raw
+      SQL aggregation query (queries.py), not the ORM, not Python
+
+PATCH  /diagnoses/{id}/status   { clinicalStatus }
+  200 on allowed transition
+  409 application/problem+json on cured -> active
+
+POST   /mock/registry            (the atrapa - external registry double)
+  body: { diagnosisId, icd10Code }
+  400 immediately, always, if diagnosisId or icd10Code missing (not counted,
+      not retryable)
+  503 on attempt #1 and #2 for a given diagnosisId
+  202 on attempt #3 and beyond for that diagnosisId
+
+POST   /graphql                  single GraphQL endpoint (see section 5)
+
+
+5. GRAPHQL SKETCH
+--------------------
+type Query {
+  patient(pesel: String, sourceSystem: SourceSystem, kartoteka: String): Patient
+}
+
+type Patient {
+  id: ID!
+  pesel: String
+  kartoteka: String
+  diagnoses(status: ClinicalStatus): [Diagnosis!]!    # nested: patient -> diagnoses -> code
+}
+
+type Diagnosis {
+  id: ID!
+  code: Icd10Code!
+  diagnosisDate: Date!
+  clinicalStatus: ClinicalStatus!
+}
+
+type Icd10Code { code: String!, system: String!, display: String! }
+
+type Mutation {
+  registerDiagnosis(input: RegisterDiagnosisInput!): RegisterDiagnosisResult!
+}
+
+union RegisterDiagnosisResult = DiagnosisRegistered | ValidationFailed
+
+type DiagnosisRegistered { diagnosisId: ID! }
+type ValidationFailed { violations: [Violation!]! }
+type Violation { field: String!, code: String!, message: String! }
+
+  -> a rejected mutation returns data.registerDiagnosis = { violations: [...] },
+     never a top-level GraphQL `errors` entry - matching "przy odmowie oddaje
+     blad w danych odpowiedzi, a nie wyjatkiem".
+
+
+6. SEED DATA (data/seed.py) - one item per ZADANIE.md requirement
+---------------------------------------------------------------------
+  [ ] two different patients, same kartoteka number: one from SYS-A, one SYS-B
+  [ ] one diagnosis record submitted twice with the same source_record_id
+  [ ] one diagnosis with diagnosisDate in the future
+  [ ] one diagnosis with an icd10Code absent from the ValueSet
+  [ ] one diagnosis with a withdrawn ("wycofany") icd10Code
+  [ ] one diagnosis with a valid code but the wrong codingSystem
+  [ ] one diagnosis with onset given as age
+  [ ] one diagnosis with onset given as a date
+  [ ] one cured ("wyleczone") diagnosis, to later attempt the forbidden
+      cured -> active transition against (proves the 409 path)
+
+
+7. OPEN QUESTIONS FOR REVIEW BEFORE CODING STARTS
+-----------------------------------------------------
+- Visit entity: ZADANIE.md only says a diagnosis "may indicate the visit it
+  arose during" - proposing a minimal Visit(id, patient_id, occurred_at) and
+  a nullable visit_id FK on Diagnosis. No visit-specific endpoints planned
+  unless you want them.
+- registry_submissions tracking: proposing a small table/row per diagnosis
+  holding last known state (PENDING / FAILED / SUCCEEDED) + attempt count,
+  exposed as a field on GET /diagnoses/{id} so a failed submission is visible
+  via the API as required, rather than a separate endpoint. Fine, or would
+  you rather it be its own GET /diagnoses/{id}/registry-status endpoint?

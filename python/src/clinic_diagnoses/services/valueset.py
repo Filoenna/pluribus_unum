@@ -1,4 +1,4 @@
-from schemas.valueset import ValueSet, FlattenedConcept
+from clinic_diagnoses.schemas.valueset import ValueSet, FlattenedConcept
 
 from pathlib import Path
 

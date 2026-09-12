@@ -3,11 +3,11 @@ from contextlib import asynccontextmanager
 
 from pathlib import Path
 
-from services.valueset import load_value_set_index, ValueSetIndex
-from dependencies import get_value_set_index
+from clinic_diagnoses.services.valueset import load_value_set_index, ValueSetIndex
+from clinic_diagnoses.dependencies import get_value_set_index
 
 
-VALUE_SET_PATH = Path(__file__).resolve().parent.parent / "icd10_value_set.json"
+VALUE_SET_PATH = Path(__file__).resolve().parent.parent.parent.parent / "icd10_value_set.json"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

@@ -2,10 +2,23 @@ import pytest
 
 from datetime import date
 
-from clinic_diagnoses.domain.validators import validate_diagnosis_date, validate_icd_code
+from clinic_diagnoses.domain.validators import validate_diagnosis_date, validate_icd_code, validate_diagnosis
+from clinic_diagnoses.domain.result import Violation
 from clinic_diagnoses.services.valueset import ValueSetIndex
 from clinic_diagnoses.schemas.valueset import ValueSet
 
+
+DIAGNOSIS_DATE_VALIDATION = Violation(
+    field =  "diagnosis_date",
+    code = "future_date",
+    message = "Diagnosis date cannot be in the future."
+)
+
+ICD_CODE_VALIDATION = Violation(
+    field =  "icd_code",
+    code = "invalid_icd_code",
+    message = "ICD-10 code is not valid for the specified coding system."
+)
 
 # =================== TEST DATE VALIDATION ===============
 def test_empty_list_for_past_diagnosis_date():
@@ -24,19 +37,13 @@ def test_single_violation_for_future_diagnosis_date():
     today = date(2026, 10, 29)
     diagnosis_date = date(2026, 10, 30)  # A date in the future
     result = validate_diagnosis_date(diagnosis_date, today)
-    assert len(result) == 1
-    assert result[0].field == "diagnosis_date"
-    assert result[0].code == "future_date"
-    assert result[0].message == "Diagnosis date cannot be in the future."
+    assert result == [DIAGNOSIS_DATE_VALIDATION]
 
 def test_single_violation_for_future_year():
     today = date(2026, 10, 29)
     diagnosis_date = date(2027, 1, 1)  # A date in the future year
     result = validate_diagnosis_date(diagnosis_date, today)
-    assert len(result) == 1
-    assert result[0].field == "diagnosis_date"
-    assert result[0].code == "future_date"
-    assert result[0].message == "Diagnosis date cannot be in the future."
+    assert result == [DIAGNOSIS_DATE_VALIDATION]
 
 # =================== TEST ICD10 VALIDATION ===============
 
@@ -77,21 +84,72 @@ def test_empty_list_for_known_active_code(index):
 
 def test_single_violation_for_unknown_code(index):
     result = validate_icd_code(ICD10_SYSTEM, "C00", index)
-    assert len(result) == 1
-    assert result[0].field == "icd_code"
-    assert result[0].code == "invalid_icd_code"
-    assert result[0].message == "ICD-10 code is not valid for the specified coding system."
+    assert result == [ICD_CODE_VALIDATION]
 
 def test_single_violation_for_wrong_coding_system(index):
     result = validate_icd_code(OTHER_SYSTEM, "A00", index)
-    assert len(result) == 1
-    assert result[0].field == "icd_code"
-    assert result[0].code == "invalid_icd_code"
-    assert result[0].message == "ICD-10 code is not valid for the specified coding system."
+    assert result == [ICD_CODE_VALIDATION]
+    
 
 def test_single_violation_for_inactive_code(index):
     result = validate_icd_code(ICD10_SYSTEM, "B00", index)
-    assert len(result) == 1
-    assert result[0].field == "icd_code"
-    assert result[0].code == "invalid_icd_code"
-    assert result[0].message == "ICD-10 code is not valid for the specified coding system."
+    assert result == [ICD_CODE_VALIDATION]
+
+# =================== TEST DIAGNOSIS VALIDATION ===============
+
+def test_empty_list_for_correct_code_and_date(index):
+    icd_code = "A00"
+    system = ICD10_SYSTEM
+    today = date(2026, 10, 29)
+    diagnosis_date = date(2026, 10, 28)
+    result = validate_diagnosis(
+        system=system,
+        icd_code=icd_code,
+        diagnosis_date=diagnosis_date,
+        today=today,
+        value_set_index=index
+    )
+    assert result == []
+
+def test_single_violation_correct_code_incorrect_date(index):
+    icd_code = "A00"
+    system = ICD10_SYSTEM
+    today = date(2026, 10, 29)
+    diagnosis_date = date(2026, 10, 30)
+    result = validate_diagnosis(
+        system=system,
+        icd_code=icd_code,
+        diagnosis_date=diagnosis_date,
+        today=today,
+        value_set_index=index
+    )
+    assert result == [DIAGNOSIS_DATE_VALIDATION]
+
+def test_single_violation_incorrect_code_correct_date(index):
+    icd_code = "C00"
+    system = ICD10_SYSTEM
+    today = date(2026, 10, 29)
+    diagnosis_date = date(2026, 10, 28)
+    result = validate_diagnosis(
+        system=system,
+        icd_code=icd_code,
+        diagnosis_date=diagnosis_date,
+        today=today,
+        value_set_index=index
+    )
+    assert result == [ICD_CODE_VALIDATION]
+
+def test_multiple_violations_incorrect_code_incorrect_date(index):
+    icd_code = "C00"
+    system = ICD10_SYSTEM
+    today = date(2026, 10, 29)
+    diagnosis_date = date(2026, 10, 30)
+    result = validate_diagnosis(
+        system=system,
+        icd_code=icd_code,
+        diagnosis_date=diagnosis_date,
+        today=today,
+        value_set_index=index
+    )
+    assert set(result) == {DIAGNOSIS_DATE_VALIDATION, ICD_CODE_VALIDATION}
+    assert len(result) == 2

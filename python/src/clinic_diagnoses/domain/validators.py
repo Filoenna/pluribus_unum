@@ -30,3 +30,15 @@ def validate_icd_code(
         )
         return [violation]
     return []
+
+def validate_diagnosis(
+        system: str,
+        icd_code: str,
+        diagnosis_date: date,
+        today: date,
+        value_set_index: ValueSetIndex
+) -> list[Violation]:
+    violations: list[Violation] = []
+    violations.extend(validate_diagnosis_date(diagnosis_date=diagnosis_date, today=today))
+    violations.extend(validate_icd_code(system=system, icd_code=icd_code, value_set_index=value_set_index))
+    return violations

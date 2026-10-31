@@ -1,19 +1,24 @@
 from dataclasses import dataclass
 from datetime import date
-from enum import Enum
+from enum import StrEnum
 
-class SourceSystem(Enum):
+class SourceSystem(StrEnum):
     SYS_A = "SYS_A"
     SYS_B = "SYS_B"
 
-class ClinicalStatus(Enum):
+class ClinicalStatus(StrEnum):
     ACTIVE = "active"
     CURED = "cured"
     RECURRENCE = "recurrence"
 
-class ConfirmationDegree(Enum):
+class ConfirmationDegree(StrEnum):
     SUSPECTED = "suspected"
     CONFIRMED = "confirmed"
+
+class SubmissionStatus(StrEnum):
+    SENT = "sent"
+    FAILED = "failed"
+    PENDING = "pending"
 
 @dataclass(frozen=True)
 class OnsetAsDate:
@@ -22,6 +27,5 @@ class OnsetAsDate:
 @dataclass(frozen=True)
 class OnsetAsAge:
     age: int
-
 
 Onset = OnsetAsDate | OnsetAsAge
